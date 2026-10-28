@@ -1,30 +1,55 @@
+import logging
+
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, MessageOriginChannel, MessageOriginChat, MessageOriginHiddenUser, MessageOriginUser
+from aiogram.types import BotCommand, BotCommandScopeChat, Message, MessageOriginChannel, MessageOriginChat, MessageOriginHiddenUser, MessageOriginUser
 
 from config import settings
 from services.batcher import Batcher
-from services.report import collect
+from services.report import collect, send_proposals
+from services.task_views import MAIN_KB, draft_from_text
+from services.tasks import TaskStore
 
+log = logging.getLogger(__name__)
 router = Router()
 # Всё, что пишут боту посторонние, молча игнорируется
 router.message.filter(F.chat.type == ChatType.PRIVATE, F.from_user.id == settings.OWNER_ID)
 
 FORWARD_KEY = "forwarded"
 
-HELP = f"""👋 Я делаю сводки по голосовым.
+COMMANDS = [
+    BotCommand(command="tasks", description="📋 Открытые задачи"),
+    BotCommand(command="add", description="➕ Добавить задачу: /add текст"),
+    BotCommand(command="today", description="📅 Что горит сегодня"),
+    BotCommand(command="closed", description="✅ Закрытые задачи"),
+    BotCommand(command="now", description="🎤 Свести голосовые сейчас"),
+    BotCommand(command="status", description="⏳ Что в очереди"),
+    BotCommand(command="help", description="❓ Как пользоваться"),
+]
 
-Как это работает:
-1. Подключи меня: Настройки → Изменить профиль → Автоматизация чатов → выбери меня → «Только выбранные чаты» → чат с начальником.
-2. Когда в этом чате придут голосовые, я подожду {settings.BATCH_DELAY // 60 or 1} мин тишины, расшифрую их и пришлю сюда сводку по задачам.
-3. В чат с собеседником я ничего не пишу — только слушаю.
+digest = f"в {settings.DIGEST_TIME[0]:02d}:{settings.DIGEST_TIME[1]:02d}" if settings.DIGEST_TIME else None
+HELP = f"""👋 Я твой помощник по задачам от начальника.
 
-Ещё можно просто переслать мне голосовые — сделаю сводку через {settings.FORWARD_DELAY} с после последнего.
+🎤 Голосовые
+Подключи меня: Настройки → Изменить профиль → Автоматизация чатов → выбери меня → «Только выбранные чаты» → чат с начальником. \
+Когда придут голосовые, я подожду {max(settings.BATCH_DELAY // 60, 1)} мин тишины, расшифрую их и пришлю сюда сводку. \
+По каждой найденной задаче спрошу, добавить ли её в список. В чат с собеседником я ничего не пишу.
+Ещё голосовые можно просто переслать мне.
+
+📋 Задачи
+Кнопка «📋 Задачи» внизу — список открытых. В задаче: подробности, «✅ Закрыть» и «⏰ Напомнить».
+Напиши мне любой текст — предложу сделать из него задачу.{f'''
+Каждое утро {digest} пришлю, что горит.''' if digest else ''}
 
 Команды:
-/now — сделать сводку прямо сейчас, не дожидаясь паузы
-/status — что сейчас в очереди"""
+/tasks — открытые задачи
+/add текст — добавить задачу сразу
+/today — что горит сегодня
+/closed — закрытые (можно вернуть в работу)
+/now — свести голосовые сейчас, не дожидаясь паузы
+/status — что копится в очереди"""
 
 
 def _origin_name(message: Message) -> str:
@@ -40,10 +65,23 @@ def _origin_name(message: Message) -> str:
     return "Ты"
 
 
+async def set_commands(bot: Bot) -> None:
+    """Меню команд видно только владельцу."""
+    try:
+        await bot.set_my_commands(COMMANDS, scope=BotCommandScopeChat(chat_id=settings.OWNER_ID))
+    except TelegramAPIError as e:
+        log.warning("Не удалось задать меню команд (напиши боту /start): %s", e)
+
+
 @router.message(CommandStart())
+async def cmd_start(message: Message, bot: Bot):
+    await set_commands(bot)
+    await message.answer(HELP, reply_markup=MAIN_KB)
+
+
 @router.message(Command("help"))
-async def cmd_start(message: Message):
-    await message.answer(HELP)
+async def cmd_help(message: Message):
+    await message.answer(HELP, reply_markup=MAIN_KB)
 
 
 @router.message(Command("now"))
@@ -78,6 +116,11 @@ async def on_forward(message: Message, bot: Bot, batcher: Batcher):
         await message.answer(f"📥 Принял. Сводка будет через {settings.FORWARD_DELAY} с после последнего сообщения (или /now).")
 
 
+@router.message(F.text, ~F.text.startswith("/"))
+async def text_to_task(message: Message, bot: Bot, store: TaskStore):
+    await send_proposals(bot, store, [draft_from_text(message.text)], source="Ты")
+
+
 @router.message()
 async def fallback(message: Message):
-    await message.answer("Перешли мне голосовые или подключи меня к чату с начальником. Подробнее — /help")
+    await message.answer("Не понял 🤔 Список команд — /help")

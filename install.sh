@@ -120,6 +120,8 @@ User=$APP_USER
 WorkingDirectory=$APP_DIR
 ExecStart=$APP_DIR/.venv/bin/python bot.py
 Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+# База задач: /var/lib/$SERVICE/tasks.db
+StateDirectory=$SERVICE
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

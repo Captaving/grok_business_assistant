@@ -31,6 +31,19 @@ def _zone(name: str, default: str) -> ZoneInfo:
         sys.exit(f"{name}: неизвестный часовой пояс {raw!r}. Пример: Europe/Moscow")
 
 
+def _clock(name: str, default: str) -> tuple[int, int] | None:
+    raw = os.getenv(name, default).strip().lower()
+    if raw in ("", "0", "off", "нет"):
+        return None
+    try:
+        hour, minute = (int(x) for x in raw.split(":"))
+        if 0 <= hour < 24 and 0 <= minute < 60:
+            return hour, minute
+    except ValueError:
+        pass
+    sys.exit(f"{name} должно быть временем вида 09:00 (или off), а сейчас: {raw!r}")
+
+
 @dataclass(frozen=True)
 class Settings:
     BOT_TOKEN: str
@@ -44,6 +57,8 @@ class Settings:
     FORWARD_DELAY: int  # то же для пересланных боту сообщений
     TIMEZONE: ZoneInfo
     SEND_TRANSCRIPT: bool
+    DB_PATH: str
+    DIGEST_TIME: tuple[int, int] | None  # утренняя сводка по задачам, None — выключена
 
 
 settings = Settings(
@@ -60,4 +75,7 @@ settings = Settings(
     FORWARD_DELAY=_int("FORWARD_DELAY", "30"),
     TIMEZONE=_zone("TIMEZONE", "Europe/Moscow"),
     SEND_TRANSCRIPT=os.getenv("SEND_TRANSCRIPT", "1").strip().lower() not in ("0", "false", "no", "нет"),
+    # STATE_DIRECTORY выставляет systemd (StateDirectory=), локально база ляжет рядом с ботом
+    DB_PATH=os.getenv("DB_PATH") or os.path.join(os.getenv("STATE_DIRECTORY", "."), "tasks.db"),
+    DIGEST_TIME=_clock("DIGEST_TIME", "09:00"),
 )

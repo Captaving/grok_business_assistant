@@ -3,12 +3,14 @@ from datetime import datetime
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import BufferedInputFile, Message
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup
 
 from config import settings
 from services.batcher import Batch, Batcher
 from services.groq_stt import transcribe
-from services.summarizer import split_text, summarize
+from services.summarizer import render_summary, split_text, summarize
+from services.task_views import card_text, proposal_kb
+from services.tasks import TaskDraft, TaskStore
 
 log = logging.getLogger(__name__)
 
@@ -25,14 +27,23 @@ def local(dt: datetime) -> datetime:
     return dt.astimezone(settings.TIMEZONE)
 
 
-async def notify(bot: Bot, text: str) -> None:
-    """Пишет владельцу. Больше бот не пишет никому."""
-    for part in split_text(text, TG_LIMIT) or [text]:
+async def notify(bot: Bot, text: str, reply_markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | None = None) -> None:
+    """Пишет владельцу. Больше бот не пишет никому. Кнопки цепляются к последней части."""
+    parts = split_text(text, TG_LIMIT) or [text]
+    for i, part in enumerate(parts):
         try:
-            await bot.send_message(settings.OWNER_ID, part)
+            await bot.send_message(settings.OWNER_ID, part, reply_markup=reply_markup if i == len(parts) - 1 else None)
         except TelegramAPIError as e:
             log.warning("Не могу написать владельцу (он нажал /start у бота?): %s", e)
             return
+
+
+async def send_proposals(bot: Bot, store: TaskStore, drafts: list[TaskDraft], source: str) -> None:
+    """Каждую найденную задачу — отдельным сообщением с вопросом «Добавить?»."""
+    for i, draft in enumerate(drafts, 1):
+        task = store.add(draft, source)
+        head = f"🆕 Задача {i} из {len(drafts)}" if len(drafts) > 1 else "🆕 Новая задача"
+        await notify(bot, f"{head}\n\n{card_text(task)}\n\nДобавить в задачи?", reply_markup=proposal_kb(task))
 
 
 def _media(message: Message):
@@ -72,7 +83,7 @@ def collect(batcher: Batcher, bot: Bot, message: Message, *, key, title, sender,
     return is_new
 
 
-def make_processor(bot: Bot):
+def make_processor(bot: Bot, store: TaskStore):
     async def process(batch: Batch) -> None:
         lines, voices, texts, failed = [], 0, 0, 0
         for entry in batch.entries:
@@ -99,17 +110,20 @@ def make_processor(bot: Bot):
         if failed:
             header += f"\n⚠️ Не распознано: {failed}"
 
-        summary_failed = False
+        senders = {e.sender for e in batch.entries}
+        source = senders.pop() if len(senders) == 1 else batch.title
+
+        summary = None
         try:
-            summary = await summarize(transcript, batch.title, datetime.now(settings.TIMEZONE))
+            summary = await summarize(transcript, source, datetime.now(settings.TIMEZONE))
+            text = render_summary(summary)
         except Exception as e:
             log.exception("Не удалось сделать сводку")
-            summary_failed = True
-            summary = f"⚠️ Не получилось сделать сводку: {e}\nПолная расшифровка — в файле ниже."
+            text = f"⚠️ Не получилось сделать сводку: {e}\nПолная расшифровка — в файле ниже."
 
-        await notify(bot, f"{header}\n\n{summary}")
+        await notify(bot, f"{header}\n\n{text}")
 
-        if settings.SEND_TRANSCRIPT or summary_failed:
+        if settings.SEND_TRANSCRIPT or summary is None:
             try:
                 await bot.send_document(
                     settings.OWNER_ID,
@@ -118,5 +132,8 @@ def make_processor(bot: Bot):
                 )
             except TelegramAPIError as e:
                 log.warning("Не удалось отправить расшифровку: %s", e)
+
+        if summary and summary.tasks:
+            await send_proposals(bot, store, summary.tasks, source=source)
 
     return process
