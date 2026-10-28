@@ -1,52 +1,44 @@
 import asyncio
 import logging
+
 from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BotCommand, BotCommandScopeChat
 
 from config import settings
-from database import init_db
-
-from handlers.start import router as start_router
-from handlers.prompt import router as prompt_router
-from handlers.settings import router as settings_router
-from handlers.instructions import router as instructions_router
-from handlers.test_mode import router as test_router
 from handlers.business import router as business_router
+from handlers.owner import router as owner_router
+from services.batcher import Batcher
+from services.report import make_processor, notify
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("bot")
+
 
 async def main():
-    await init_db()
+    bot = Bot(token=settings.BOT_TOKEN)
+    dp = Dispatcher()
+    dp["batcher"] = Batcher(process=make_processor(bot))
+    dp.include_routers(owner_router, business_router)
 
-    bot = Bot(
-        token=settings.BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-    )
+    me = await bot.get_me()
+    log.info("Бот @%s запущен, владелец: %s", me.username, settings.OWNER_ID)
 
-    dp = Dispatcher(storage=MemoryStorage())
+    try:
+        await bot.set_my_commands(
+            [
+                BotCommand(command="now", description="Сводка прямо сейчас"),
+                BotCommand(command="status", description="Что в очереди"),
+                BotCommand(command="help", description="Как пользоваться"),
+            ],
+            scope=BotCommandScopeChat(chat_id=settings.OWNER_ID),
+        )
+    except TelegramAPIError as e:
+        log.warning("Не удалось задать меню команд (напиши боту /start): %s", e)
 
-    dp.include_router(start_router)
-    dp.include_router(prompt_router)
-    dp.include_router(settings_router)
-    dp.include_router(instructions_router)
-    dp.include_router(test_router)
-    dp.include_router(business_router)
+    await notify(bot, "🟢 Бот запущен. /help — как пользоваться")
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
-    logging.info("Бот запущен...")
-
-    await dp.start_polling(
-        bot,
-        allowed_updates=[
-            "message",
-            "callback_query",
-            "business_connection",
-            "business_message",
-            "edited_business_message",
-            "deleted_business_messages"
-        ]
-    )
 
 if __name__ == "__main__":
     asyncio.run(main())

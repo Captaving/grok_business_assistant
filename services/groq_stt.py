@@ -1,31 +1,21 @@
-import httpx
-import os
-from config import settings
+import aiohttp
 
-async def transcribe_audio(file_path: str) -> str:
-    """
-    Распознаёт голосовое сообщение через Groq Whisper.
-    """
-    url = f"{settings.GROQ_BASE_URL}/audio/transcriptions"
-    
-    headers = {
-        "Authorization": f"Bearer {settings.GROQ_API_KEY}"
-    }
-    
-    data = {
-        "model": "whisper-large-v3",
-        "response_format": "json",
-        "language": "ru"  # можно сделать динамическим
-    }
-    
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        with open(file_path, "rb") as audio_file:
-            files = {"file": (os.path.basename(file_path), audio_file, "audio/ogg")}
-            try:
-                response = await client.post(url, headers=headers, data=data, files=files)
-                response.raise_for_status()
-                result = response.json()
-                return result.get("text", "").strip()
-            except Exception as e:
-                print(f"[GROQ STT ERROR] {e}")
-                return ""
+from config import settings
+from services import groq
+
+
+async def transcribe(audio: bytes, filename: str) -> str:
+    """Распознаёт аудио через Groq Whisper. Формат Groq определяет по расширению filename."""
+
+    def form() -> aiohttp.FormData:
+        data = aiohttp.FormData()
+        data.add_field("file", audio, filename=filename)
+        data.add_field("model", settings.STT_MODEL)
+        data.add_field("response_format", "json")
+        data.add_field("temperature", "0")
+        if settings.STT_LANGUAGE:
+            data.add_field("language", settings.STT_LANGUAGE)
+        return data
+
+    result = await groq.request("/audio/transcriptions", form=form)
+    return (result.get("text") or "").strip()
